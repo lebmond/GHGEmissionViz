@@ -1,0 +1,553 @@
+---
+title: "Untitled"
+author: "Kunling Yang"
+date: "2022-11-20"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+# Setup
+
+```{r}
+library(readxl) # read data from .xlsx file 
+library(useful)
+library(ggstance) # vertical dodge
+library(grid)
+library("rnaturalearth")
+library("rnaturalearthdata")
+library(treemapify) # For making treemaps
+library(RColorBrewer)
+library(stringr) # used for paste
+library(ggplot2)
+library(ggrepel) # label points
+library(tidyverse)
+library(viridis) #visual-disable friendly color
+library(dplyr) # use to sort rows
+library(purrr) # for aligning countries names
+library(scales)
+library(directlabels) # adding label at the end of geom_line
+library(zoo) # work with irregular time series, e.g. interp()
+library(rgdal) # to draw global map
+library(xtable) # na.approx by country
+library(tidyverse)
+library(waffle) # remotes::install_github("hrbrmstr/waffle")
+library(patchwork)
+library(lubridate)
+library(extrafont)
+library(ggtext)
+library(countrycode) # used to standardlize the contry's code
+library(rgdal)
+
+cbbPalette <- c("#000000", "#E69F00", "#568FE9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+palette <- brewer.pal("Greys", n=9) # Generate the colors for the chart
+my_seed <- 1464 # Peer Gynt Suite No.1, Op.46:4 In the Hall of Mountain King, my favorite
+`%!in%` <- Negate(`%in%`) # create not in operator
+infographic.background = palette[4]
+color.grid.major = palette[8]
+color.axis.text = palette[8]
+color.axis.title = palette[8]
+color.title = palette[8]
+my_family <- "Impact"
+
+myTheme <- function() {
+  # Begin construction of chart
+  theme_bw(base_size=9) +
+    theme(text = element_text(size = 10, family = my_family)) + 
+    # Set the entire chart Continent to a light gray color
+    theme(panel.background=element_rect(fill=infographic.background, color=infographic.background)) +
+    theme(plot.background=element_rect(fill=infographic.background, color=infographic.background)) +
+    theme(panel.border=element_rect(color=infographic.background)) +
+    # Format the grid
+    theme(panel.grid.major=element_line(color=color.grid.major,size=.25)) +
+    theme(panel.grid.minor=element_blank()) +
+    theme(axis.ticks=element_blank()) +
+    # Format the legend, but hide by default
+    theme(legend.background = element_rect(fill=infographic.background)) +
+    theme(legend.text = element_text(size=7,color=color.axis.title,
+                                     family = my_family)) +
+    # Set title and axis labels, and format these and tick marks
+    theme(plot.title=element_text(face="bold", color=color.title, size = 22, 
+                                  hjust = 0.5, vjust=0, family = my_family)) +
+    theme(plot.subtitle=element_text(face="bold", color=color.title, size = 16, 
+                                  hjust = 0.5, vjust=0, family = my_family)) +
+    theme(axis.text.x=element_text(family = my_family, size = 14,color = color.axis.text)) +
+    theme(axis.text.y=element_text(family = my_family, size = 14,color = color.axis.text)) +
+    theme(axis.title.x=element_text(family = my_family, size = 16, 
+                                    color = color.axis.title, vjust=0)) +
+    theme(axis.title.y=element_text(family = my_family, size = 16,
+                                    color = color.axis.title, vjust = 1.25)) +
+    theme(plot.subtitle = element_text(hjust = 0.8, color = color.axis.title)) +
+    theme(legend.position = "bottom") +
+    theme(legend.key = element_blank())
+}
+
+pop_raw <- read.csv("population.csv") # population data set
+sustain_raw <- read.csv("unsdg_2002_2021.csv") # ONU sustainable development dataset
+co2_raw <- read_excel("EDGARv7.0_FT2021_fossil_CO2_booklet_2022.xlsx", sheet = 2) 
+# CO2 Emission Data Set, the unit is million tons
+
+```
+
+\newpage
+# Data Cleaning
+
+```{r}
+## Part1 : CO2 data cleaning
+
+## guess the country code format of CO2
+knitr::kable(guess_field(co2_raw$`EDGAR Country Code`))
+# no emission actually means loss of data, get rid of them to help plotting trend
+co2 <- co2_raw %>% filter(!row_number() %in% 211:213) %>% # get rid of summary for now
+  select(2,4 : (4 + 2021 - 1970)) %>% 
+  rename(iso3c = `EDGAR Country Code`) %>%
+  pivot_longer(cols = 2:(2 + 2021 - 1970), names_to = "dt_year", values_to = "emission") %>%
+  replace(.==0, NA) %>% 
+  group_by(iso3c) %>% mutate(emission = na.approx(emission, rule = 2)) %>% # interpolate NA
+  ungroup()
+knitr::kable(filter(co2, is.na(iso3c))) # Check countries that are not in iso3c
+
+# check countries presented in one but not the other dataset
+lst <- setdiff(pop_raw$Country.Name, sustain_raw$country)
+knitr::kable(guess_field(pop_raw$Country.Code)) # guess the code format for pop_raw
+# truncate the country name, iso3c code, and population from 1970 to 2021
+pop <- pop_raw %>% select(c(1,2, 15: 66)) %>%
+  rename(country = Country.Name, iso3c = Country.Code) %>%
+  mutate(iso3c = countrycode(country, origin = "country.name", 
+                             dest = "iso3c", warn = FALSE)) %>%
+  pivot_longer(starts_with("X"), names_to = "dt_year", values_to = "popu") %>%
+  mutate(dt_year = str_replace(dt_year, "X", ""), # formatting the year
+         country = recode(country, "Bahamas, The" = "Bahamas", 
+                     "Bolivia" = "Bolivia (Plurinational State of)",
+                     "Congo, Dem. Rep." = "Democratic Republic of the Congo",
+                     "Congo, Rep." = "Congo",
+                     "Cote d'Ivoire" = "Côte d'Ivoire",
+                     "Curacao" = "Curaçao",
+                     "Egypt, Arab Rep." = "Egypt", 
+                     "Gambia, The" = "Gambia",
+                     "Hong Kong SAR, China" = "China, Hong Kong Special Administrative Region",
+                     "Iran, Islamic Rep." = "Iran (Islamic Republic of)",
+                     "Korea, Dem. People's Rep." = "Democratic People's Republic of Korea",
+                     "Korea, Rep." = "Republic of Korea",
+                     "Kyrgyz Republic" = "Kyrgyzstan",
+                     "Lao PDR" = "Lao People's Democratic Republic",
+                     "Macao SAR, China" = "China, Macao Special Administrative Region",
+                     "Micronesia, Fed. Sts." = "Micronesia (Federated States of)",
+                     "Moldova" = "Republic of Moldova",
+                     "Russian Federation" = "Russia",
+                     "Slovak Republic" = "Slovakia",
+                     "St. Lucia"  = "Saint Lucia",
+                     "St. Martin (French part)" = "Saint Martin (French Part)",
+                     "St. Vincent and the Grenadines" = "Saint Vincent and the Grenadines",
+                     "Tanzania" = "United Republic of Tanzania",
+                     "Turkiye" = "Türkiye",
+                     "Venezuela, RB" = "Venezuela (Bolivarian Republic of)",
+                     "Vietnam" = "Viet Nam",
+                     "Virgin Islands (U.S.)" = "United States Virgin Islands",
+                     "Yemen, Rep." = "Yemen")) %>% 
+  filter(!is.na(iso3c) & !is.na(popu))
+#make sure all countries have a population data for year of 1970 to 2021
+pop %>% filter(is.na(iso3c) | is.na(popu)) %>% distinct(country) 
+
+## combine it with the main dataset along with the continent information
+##  so that we have population for each country from 2002 to 2021
+sustain <- sustain_raw %>% 
+  # drop emission data since too many na's 
+  select(!c(dt_date,region, greenhousegas_emissione_mtco2equivalent)) %>%
+  mutate(country = # change several countries whose name are too long to display
+           recode(country, "United States of America" = "United States",
+                  "United Kingdom of Great Britain and Northern Ireland" = "United Kingdom",
+                  "Russian Federation" = "Russia"),
+         dt_year = as.numeric(dt_year)) %>%
+  # merge with population
+  merge(pop, by.x = c("country", "dt_year"), by.y = c("country", "dt_year"), 
+        all = TRUE) %>%
+  # merge with greenhouse gas emission notice this one is from 1970 - 2021
+  merge(co2, by.x = c("iso3c", "dt_year"), by.y = c("iso3c", "dt_year"), all= TRUE) %>%
+  # fill the unmatched year
+  group_by(iso3c) %>% fill(c(level_of_development, country), .direction = "up") %>%
+  # interpolating the population and emission by group
+  mutate(popu = na.approx(popu, na.rm = FALSE),
+         emission = na.spline(emission, na.rm = FALSE),
+         is_eu27 = ifelse(iso3c == "GBR", # thank GBR for leaving EU!
+                          NA,
+                          countrycode(iso3c, origin = "iso3c", 
+                                      dest = "eu28", warn = FALSE))) %>%
+  ungroup() %>% filter(!is.na(iso3c) & !is.na(level_of_development)) %>%
+  # get the continent and average emission per capita for each country
+  mutate(continent = countrycode(iso3c, origin = "iso3c", dest = "continent"),
+         emission_per_capita = emission * 10 ^ 6/ popu) %>%
+  mutate(is_eu27 = ifelse(is.na(is_eu27),FALSE, TRUE)) %>%
+  arrange(country, dt_year) %>%
+  relocate(c(continent, popu, emission, emission_per_capita, is_eu27), 
+           .after = level_of_development)
+
+
+# re-rank the level of development
+sustain$level_of_development <- recode(sustain$level_of_development,
+                                        "Developed Economies" = "Developed",
+                                        "Economies in Transition" = "Transisting",
+                                        "Developing Economies" = "Developing",
+                                         "Least Developed" = "Underdeveloped",
+                                        "Not Specified" = "Unspecified")
+
+## re-order development level so that it actually makes sense rather than
+##   alphabetical order
+sustain$level_of_development <- factor(sustain$level_of_development,
+                                       c("Developed", "Transisting", "Developing",
+                                         "Underdeveloped", "Unspecified"))
+
+# create the whole-period(1970-2021) average summary for each country
+avg <- sustain %>% group_by(country) %>%
+  summarise(ann_avg_emission = round(mean(emission, na.rm = TRUE),2),
+            avg_popu = round(mean(popu, na.rm = TRUE), 2),
+            per_capita = ann_avg_emission / avg_popu * (10 ^ 6), # the unit is in tons
+            continent = continent[1],
+            level_of_development = level_of_development[1],
+            iso3c = iso3c[1],
+            is_eu27 = is_eu27[1]) %>%
+  filter(!is.na(ann_avg_emission)) %>% # drop those with no available data
+  # add a column top_10 = 1 if one's emission per capita is among top 10 worldwide
+  arrange(desc(per_capita)) %>% 
+  mutate(font = ifelse(row_number() <= 10, "italic", "plain")) %>% 
+  arrange(country)
+```
+\newpage
+# Treemap (Wildcard)
+
+```{r treemap}
+## create a treemap for average GHG emission worldwide
+treemap <-ggplot(avg, aes(area = ann_avg_emission, subgroup = continent, 
+                          subgroup2 = is_eu27,
+                          label = country, fill = level_of_development)) +
+  geom_treemap(alpha = 0.9) + 
+  geom_treemap_subgroup2_border(colour = "firebrick", lwd = 1.5, linetype = 3)+
+  geom_treemap_subgroup_border() +  
+  # continent text
+  geom_treemap_subgroup_text(place = "middle",colour = "grey", alpha = 0.85,grow = F) + 
+  geom_treemap_text(place="bottomleft",color="white", alpha=0.9) +
+  labs(title = "Treemap of Greenhouse Gas Emission Per Capita", 
+       subtitle = "(Averaged From 1970 to 2021)") +
+  scale_fill_viridis(discrete = TRUE, direction = 1, option = "plasma",
+                     name = "Economy \n Level") +
+  # claim the range for x and y so that we can put a label for EU27
+  scale_x_continuous(limits = c(0,1)) +
+  scale_y_continuous(limits = c(0,1)) +
+  annotate(geom = "text", x = 0.8825, y = 0.175, col = "firebrick",
+           alpha = 0.3, size = 18, label = "EU27") +
+  myTheme() + 
+  # hide both axis since we customize the range for them ealier
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(),
+        axis.text.y = element_blank(), axis.title.y = element_blank(),
+        panel.grid.major = element_blank())
+#+ theme(text = element_text(face = ifelse(avg$is_eu27, "italic", "plain")))
+treemap
+```
+\newpage
+# Violin Plot (Categorical)
+```{r ,fig.width=7, fig.height= 4}
+## How does economy developing level relates to the emission?
+
+# Take a look at the top 10 countries with most emission per capita and G20 countries!
+selectedCtry <- head(avg[order(avg$per_capita, decreasing = T),"country"],10) %>% 
+  pull() %>% union(G20$country) %>% 
+  recode("United States" = "United States",
+         "South Korea" = "Republic of Korea",
+         "Turkey" = "Türkiye") 
+
+# get the list of world average emission per capita, from 1970 to 2021
+world_avg <- sustain %>% group_by(dt_year) %>% 
+  filter(!is.na(emission)) %>% # only retain the column whose emission is not NA
+  summarise(popu = sum(popu),
+            emission = sum(emission),
+            emission_per_capita = 10 ^ 6 * emission / popu,
+            continent = NA,
+            level_of_development = NA,
+            country = "World",
+            iso3c = "WRL")
+
+# get the sample size for each level of economic development
+size = avg %>% group_by(level_of_development) %>% summarize(num=n())
+x_axis_label <- paste0(size$level_of_development, "\nCountries\nn = ", size$num)
+
+avg %>% filter(per_capita != 0) %>% # they cause infinite on a log10 base
+  ggplot(aes(x = level_of_development, y = per_capita, 
+             fill = level_of_development)) +
+  # mark the 2021 average emission level per capita
+  geom_hline(yintercept = as.numeric(world_avg[nrow(world_avg),"emission_per_capita"]), 
+             col = palette[7], lwd = 0.8, lty = 2) + 
+  geom_violin(width=1, color = "black", size=0.2, alpha = 0.9, show.legend = FALSE) +
+  geom_boxplot(width=0.3, color="grey", alpha=0.2) + # supermise boxplot summary
+  stat_summary(fun = "mean",geom = "crossbar", alpha = 0.7, colour = "red",
+               # extend the mean summary line towards the violin boundary
+               width = c(1,0.5, 0.5, 0.5, 0.75)) +
+  stat_summary(fun = "median", geom = "crossbar", alpha = 0.5, colour = "gray",
+               # extend the median summary line towards the violin boundary
+               width = c(1,0.5, 0.5, 0.61, 0.9)) + 
+  # plot those countries who are not selected
+  geom_jitter(aes(size = avg_popu, color = continent),
+              data = avg %>% filter(per_capita != 0, country %!in% selectedCtry), 
+              position = position_jitter(), 
+              alpha = 0.7) + 
+  # plot those countries that arxe selected so we can specify their jitter position
+  geom_jitter(aes(size = avg_popu, color = continent),
+              data = avg %>% filter(per_capita != 0, country %in% selectedCtry) %>%
+                arrange(country),
+              position = position_jitter(seed = my_seed), 
+              alpha = 0.7) + 
+  # add label for these selected countries
+  geom_text_repel(aes(label = country, color = continent, fontface = font), size = 4,
+                  data = avg %>% filter(per_capita != 0, country %in% selectedCtry) %>%
+                    arrange(country),
+                  position = position_jitter(seed = my_seed), 
+                  show.legend = FALSE,
+                  box.padding = unit(0.7, "lines")) +
+  scale_fill_viridis(discrete = TRUE, option = "plasma") +
+  scale_colour_manual(values= cbbPalette) + # color for nodes
+  # scale to a log_10 basis to facilitate plotting, thanks Palau for its emission!
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_x_discrete(labels = x_axis_label) +
+  coord_flip() +
+  xlab("") + ylab("Annual Greenhouse Gas Emissions in Tons (GHG) Per Capita") +
+  guides(fill = "none", fontface = "none", size = "none") + # get ride of development level
+  labs(title = "Violin Plot of Greenhouse Gas Emissions", 
+       subtitle = "Averaged across 1970 to 2021") +
+  annotate("text", x = 4.375, y = 8, col = palette[7], family = "Impact",
+           label = "2021 World Avg \nEmission per Capita") +
+  # get ride of violin guide line
+  myTheme() -> violin_plot
+violin_plot
+```
+
+\newpage
+# Line Chart (Substantial 2D continuous)
+```{r}
+selectedCtryCode <- c("CHN", "USA", "RUS","KOR", "IND", "BRZ", "CAD",
+                      "GBR", "JPN")
+# aggregate EU together to avoid overwhelmingly crowded plot
+EU <- sustain %>% filter(is_eu27) %>% group_by(dt_year) %>%
+  summarise(popu = sum(popu),
+            emission = sum(emission),
+            continent = continent[1],
+            emission_per_capita = emission * 10 ^ 6 / popu,
+            level_of_development = "Developed",
+            country = "European Union",
+            iso3c = "EUR") %>% ungroup()
+
+sustain_EU <- sustain %>% filter(!is_eu27) %>%  # filter those who are inside EU
+  subset(iso3c %in% selectedCtryCode) %>% 
+  select(country, iso3c, dt_year, popu, emission, continent, 
+         emission_per_capita, level_of_development) %>%
+  rbind(EU) %>% # and add EU as an entity towards sustain
+  rbind(world_avg) %>%
+  mutate(dt_year = as.numeric(dt_year))
+
+# select every 5 years to plot the point for readability
+sustain_EU_point <- sustain %>% subset(iso3c %in% selectedCtryCode) %>%
+  select(country, iso3c, dt_year, popu, emission, continent, 
+         emission_per_capita, level_of_development) %>%
+  rbind(EU) %>%
+  mutate(dt_year = as.numeric(dt_year)) %>%
+  filter(dt_year %in% seq(1970, 2021, 5))
+  
+
+lineplot <- sustain_EU %>%
+  ggplot(aes(group = country, x = dt_year, label = country,
+             color = country, y = emission_per_capita)) +
+  # trend for emission
+  geom_path(linewidth = 0.5, alpha = 0.9) +
+  # add label for them
+  geom_dl(aes(label = iso3c), method = "last.bumpup",
+         position = position_dodge2v(height = 0.07), cex = 0.8) +
+  geom_point(aes(size = popu), data = sustain_EU_point, alpha = 0.7) +
+  annotate("rect", fill = "red", xmin = 2019, xmax = 2021, 
+           ymin = 0, ymax = 25, alpha = 0.2) +
+  annotate("text", x = 2016, y = 22.5, label = "COVID-19\nPandemic", color = 
+             adjustcolor("red", alpha = 0.2)) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  # make room for country labels on the right!
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.08))) +
+  scale_size_continuous(range = c(0.1,6)) +
+  ylim(0, 25) +
+  xlab("Year") + ylab("Greenhouse Gas Emission per Capita\n(in Tons)") +
+  labs(title = "Bubble Line Chart of Greenhouse Gas Emission Level per Capita",
+       subtitle = "Bubble size implies national population size.") +
+  guides(size = "none", label = "none", color = "none") + myTheme()
+lineplot
+
+# # option 3: population vs total emission
+# # possibly add a fitted line (GHS emission vs population?)
+# sustain_EU %>% ggplot(aes(group = country,
+#                         x = popu, color = country,
+#                         y = emission)) +
+#   geom_path(linewidth = 0.2) +
+#   scale_color_viridis(discrete = TRUE, direction = -1, option = "plasma") +
+#   scale_y_log10() +
+#   scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+#                 labels = trans_format("log10", math_format(10^.x))) +
+#                 #labels = c(t(outer(seq(10^(.x - 6), "Million", paste)))))+
+#   geom_point(aes(size = popu), data = sustain_EU_point, alpha = 0.7) +
+#   scale_size(name = "Population Size", labels = comma)+
+#   geom_dl(aes(label = iso3c), method = "last.points",
+#           position = position_dodge(),cex = 0.8) +
+#   xlab("Population (Log-Transformed)") + 
+#   ylab("Greenhouse Gas Emission Level\n(in Million Ton, Log-Transformed)") +
+#   labs(title = "Countries Population vs. Greenhouse Gas Emission Level",
+#        subtitle = "Bubble size implies national population size") +
+#   guides(color = "none", size = "none") + myTheme()
+```
+\newpage
+# Map (Homebrew)
+```{r fig.width= 8, fig.height=6}
+# do not why I can't map font string 
+# add a column tire, = 1 if one country (or distinct) emission is top 10 world wide,
+avg <- avg %>% arrange(desc(per_capita)) %>% 
+  mutate(top_10 = ifelse(row_number() <= 10, 1, 0)) %>% arrange(country)
+#stat_fill ghg_per_capita
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world <- merge(world, avg %>% select(ann_avg_emission, per_capita, iso3c, top_10), 
+               # keep all countries in x(world) so that we can plot all countries
+               by.x = "iso_a3", by.y = "iso3c", all.x = TRUE) 
+
+map <-ggplot(data = world) +
+  geom_sf(aes(fill = per_capita, color = as.factor(top_10))) +
+  # label the top 10 countries
+  geom_sf_label(aes(label = iso_a3), alpha = 0.8,
+                position = position_dodge(width = 5),
+                data = world %>% filter(top_10 == 1)) +
+  scale_fill_viridis_c(name="Emission per capita", trans = "sqrt", option = "plasma") +
+  # map colors for top 10 countries
+  scale_color_manual(values = c('1' = 'orange', '0' = NA), 
+                     labels = c('1' = 'Top 10'), 
+                     breaks = c('1')) +
+  labs(title = "World Map of Greenhouse Gas Emission per Capita",
+       subtitle = 
+         paste0("(", dim(avg)[1], 
+                " effective countries and distincts in total, from 1970 to 2021)"),
+       color = "Top 10 Emission per Capita Countries") +
+  myTheme() + theme(axis.title.x = element_blank(),
+                    axis.title.y = element_blank(),
+                    legend.position = c(.18,.36), 
+                    # transparent legend background
+                    legend.background = element_rect(colour = "#00000000",
+                                                     fill = "#00000000"))
+map
+```
+
+\newpage
+# Composition
+
+```{r}
+subsub.color = "#2A2D8C"
+describe.color = "white" #backup option: palette[7], purple
+rect.color = "#F89441" #tropical orange, backup option: #E7A922
+
+my_unit <- function(x) {
+  unit(x, "npc")
+}
+  
+png("Infographic1.png", width = 30, height = 85, units = "cm", res = 500)
+grid.newpage() 
+dimx <- 28
+dimy <- 11
+pushViewport(viewport(layout = grid.layout(dimx, dimy)))
+grid.rect(gp = gpar(fill = infographic.background, col = infographic.background))
+grid.text("How Much Greenhouse Gas", 
+          y = my_unit(1), x = my_unit(0.5), vjust = 1, hjust = .5, 
+          gp = gpar(fontfamily = "Impact", col = "white", cex = 6, alpha = 0.85))
+grid.text("Are We Emitting?", y = my_unit(0.96), 
+          gp = gpar(fontfamily = "Impact", col = rect.color, cex = 5.2))
+grid.text("By Kunling Yang", x = my_unit(0.98) , y = my_unit(0.95), 
+          vjust = 1,
+          hjust = 1, gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 2))
+grid.text("STAT442 Final Project", x = my_unit(0.98), y = my_unit(0.94), 
+          vjust = 1,
+          hjust = 1, gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 2))
+
+# rectangle for first graph
+grid.rect(gp = gpar(fill = rect.color, col = rect.color), 
+          x = my_unit(0.5), y = my_unit(0.843), width = my_unit(0.9), 
+          hjust = 1, height = my_unit(0.105))
+
+# rectangle for second graph
+grid.rect(gp = gpar(fill = rect.color, col = rect.color), 
+          x = my_unit(0.5), y = my_unit(0.77), 
+          vjust = 1, width = my_unit(1), height = my_unit(0.05))
+
+# rectangle for third graph
+grid.rect(gp = gpar(fill = rect.color, col = rect.color), 
+          x = my_unit(0.5), y = my_unit(0.478), width = my_unit(1), height = my_unit(0.021))
+
+# rectangle for the fourth graph
+grid.rect(gp = gpar(fill = rect.color, col = rect.color), 
+          x = my_unit(0.5), y = my_unit(0.224), width = my_unit(1), height = my_unit(0.029))
+
+# first description words
+grid.text(paste(
+  "Greenhouse Gas can trap heat",
+  "in the atomosphere to warm ",
+  "up the whole planet.Carbon ",
+  "dioxide, methane and ",
+  "nitrous oxide are the most",
+  "common greenhouse gas.",
+  "Though in transition to",
+  "cleaner energies, our ",
+  "society still heavily rellies",
+  "on fossil fuel combustion, ",
+  "which is the main source of",
+  "greenhouse gas.", sep = "\n"),
+  x = my_unit(0.01), y = my_unit(0.8938), vjust = 1, hjust = 0,
+  gp = gpar(fontfamily = "Impact", col = describe.color, cex = 1.2))
+
+# second description words
+grid.text(paste(
+  "Due to the population size and quick economic growth rate, China contribute most greenhouse gas, followed by the United States of",
+  "America. These are now the top two biggest economy entities in the world, and they contribute to almost half of the global ",
+  "greenhouse gas emission together.",
+  "",
+  "These two countries are followed by Russian Federation and India, together they made up nearly 65% of global emission.",
+  sep = "\n"),
+  x = my_unit(0.02), y = my_unit(0.766), vjust = 1, hjust = 0,
+  gp = gpar(fontfamily = "Impact", col = describe.color, cex = 1.2))
+
+# third description words
+grid.text(paste(
+  "Many countries are practicing commitments of reducing greehouse gas emission per capita, but the increasing population",
+  "actually makes it worse. However, one positive aspect of COVID-19 is the reduced popllution and emissions.",
+  sep = "\n"),
+  x = my_unit(0.02), y = my_unit(0.482), vjust = 1, hjust = 0,
+  gp = gpar(fontfamily = "Impact", col = describe.color, cex = 1.2))
+
+# fourth description words
+grid.text(paste(
+  "National economic development levels (classified by United Nations) and greenhouse are positively relate, and developed countries should",
+  "take more responsibilities in reducing greenhouse gas emission. The spread for developed country group is smaller than all other groups.",
+  sep = "\n"),
+  x = my_unit(0.02), y = my_unit(0.236), vjust = 1, hjust = 0,
+  gp = gpar(fontfamily = "Impact", col = describe.color, cex = 1.2))
+
+print(treemap, vp = vplayout(9:14, 2:10))
+print(map, vp = vplayout(3:6, 3:11))
+print(violin_plot, vp = vplayout(23:28, 1:11))
+print(lineplot, vp = vplayout(16:21, 2:10))
+
+# first tile
+grid.text("A Glitch on World Emission per Capita", vjust = 0, hjust = 0, 
+          x = my_unit(0.01), y = my_unit(0.9), 
+          gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 1.2))
+# second title
+grid.text("How does every country contribute to this?", just = "left", 
+          y = my_unit(0.775), x = my_unit(0.01), 
+          gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 1.2))
+# third title
+grid.text("Trend that We Care", vjust = 0, hjust = 0, 
+          x = my_unit(0.01), y = my_unit(0.49), 
+          gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 1.2))
+
+# fourth title
+grid.text("Greenhouse Gas Emission & Country Economic Development Level", 
+          vjust = 0, hjust = 0, x = my_unit(0.01), y = my_unit(0.242), 
+          gp = gpar(fontfamily = "Impact", col = subsub.color, cex = 1.2))
+dev.off()
+```
